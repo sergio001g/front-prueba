@@ -8,6 +8,27 @@ const OWNER_OPTIONS = [
 ]
 
 const getToken = () => localStorage.getItem('token')
+const storageAvailable = () => typeof localStorage !== 'undefined'
+const clientsStorageKey = 'ventas_clients'
+const taskStorageKey = (owner) => `ventas_tasks_${owner}`
+const getStoredClients = () => {
+  if (!storageAvailable()) return []
+  const raw = localStorage.getItem(clientsStorageKey)
+  return raw ? JSON.parse(raw) : []
+}
+const setStoredClients = (value) => {
+  if (!storageAvailable()) return
+  localStorage.setItem(clientsStorageKey, JSON.stringify(value))
+}
+const getStoredTasks = (owner) => {
+  if (!storageAvailable()) return []
+  const raw = localStorage.getItem(taskStorageKey(owner))
+  return raw ? JSON.parse(raw) : []
+}
+const setStoredTasks = (owner, value) => {
+  if (!storageAvailable()) return
+  localStorage.setItem(taskStorageKey(owner), JSON.stringify(value))
+}
 
 function App() {
   const apiUrl = useMemo(
@@ -24,7 +45,7 @@ function App() {
     password: '',
   })
 
-  const [clients, setClients] = useState([])
+  const [clients, setClients] = useState(() => getStoredClients())
   const [clientForm, setClientForm] = useState({
     name: '',
     description: '',
@@ -38,7 +59,7 @@ function App() {
     status: 'pendiente',
   })
 
-  const [tasks, setTasks] = useState([])
+  const [tasks, setTasks] = useState(() => getStoredTasks('sergio'))
   const [taskOwnerFilter, setTaskOwnerFilter] = useState('sergio')
   const [taskForm, setTaskForm] = useState({
     title: '',
@@ -80,6 +101,16 @@ function App() {
     [apiUrl, headers],
   )
 
+  const setClientsAndStore = useCallback((value) => {
+    setClients(value)
+    setStoredClients(value)
+  }, [])
+
+  const setTasksAndStore = useCallback((owner, value) => {
+    setTasks(value)
+    setStoredTasks(owner, value)
+  }, [])
+
   const loadSession = useCallback(async () => {
     if (!token) {
       setUser(null)
@@ -96,14 +127,37 @@ function App() {
   }, [request, token])
 
   const loadClients = useCallback(async () => {
-    const data = await request('/clients')
-    setClients(data)
-  }, [request])
+    try {
+      const data = await request('/clients')
+      if (Array.isArray(data) && data.length > 0) {
+        setClientsAndStore(data)
+        return
+      }
+      const stored = getStoredClients()
+      setClients(stored)
+    } catch {
+      const stored = getStoredClients()
+      setClients(stored)
+    }
+  }, [request, setClientsAndStore])
 
-  const loadTasks = useCallback(async (owner) => {
-    const data = await request(`/tasks?owner=${owner}`)
-    setTasks(data)
-  }, [request])
+  const loadTasks = useCallback(
+    async (owner) => {
+      try {
+        const data = await request(`/tasks?owner=${owner}`)
+        if (Array.isArray(data) && data.length > 0) {
+          setTasksAndStore(owner, data)
+          return
+        }
+        const stored = getStoredTasks(owner)
+        setTasks(stored)
+      } catch {
+        const stored = getStoredTasks(owner)
+        setTasks(stored)
+      }
+    },
+    [request, setTasksAndStore],
+  )
 
   useEffect(() => {
     loadSession()
@@ -148,20 +202,20 @@ function App() {
     localStorage.removeItem('token')
     setToken(null)
     setUser(null)
-    setClients([])
-    setTasks([])
+      setClients([])
+      setTasks([])
   }
 
   const handleCreateClient = async (event) => {
     event.preventDefault()
     setError('')
     setLoading(true)
+    const payload = {
+      name: clientForm.name.trim(),
+      description: clientForm.description.trim(),
+      price: Number(clientForm.price),
+    }
     try {
-      const payload = {
-        name: clientForm.name.trim(),
-        description: clientForm.description.trim(),
-        price: Number(clientForm.price),
-      }
       await request('/clients', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -169,6 +223,16 @@ function App() {
       setClientForm({ name: '', description: '', price: '' })
       await loadClients()
     } catch (err) {
+      const fallback = {
+        id: Date.now(),
+        name: payload.name,
+        description: payload.description,
+        price: payload.price,
+        status: 'pendiente',
+      }
+      const next = [...clients, fallback]
+      setClientsAndStore(next)
+      setClientForm({ name: '', description: '', price: '' })
       setError(err.message)
     } finally {
       setLoading(false)
@@ -194,13 +258,13 @@ function App() {
     if (!clientEditId) return
     setError('')
     setLoading(true)
+    const payload = {
+      name: clientEditForm.name.trim(),
+      description: clientEditForm.description.trim(),
+      price: Number(clientEditForm.price),
+      status: clientEditForm.status,
+    }
     try {
-      const payload = {
-        name: clientEditForm.name.trim(),
-        description: clientEditForm.description.trim(),
-        price: Number(clientEditForm.price),
-        status: clientEditForm.status,
-      }
       await request(`/clients/${clientEditId}`, {
         method: 'PATCH',
         body: JSON.stringify(payload),
@@ -208,6 +272,11 @@ function App() {
       setClientEditId(null)
       await loadClients()
     } catch (err) {
+      const next = clients.map((client) =>
+        client.id === clientEditId ? { ...client, ...payload } : client,
+      )
+      setClientsAndStore(next)
+      setClientEditId(null)
       setError(err.message)
     } finally {
       setLoading(false)
@@ -221,6 +290,8 @@ function App() {
       await request(`/clients/${id}`, { method: 'DELETE' })
       await loadClients()
     } catch (err) {
+      const next = clients.filter((client) => client.id !== id)
+      setClientsAndStore(next)
       setError(err.message)
     } finally {
       setLoading(false)
@@ -231,11 +302,11 @@ function App() {
     event.preventDefault()
     setError('')
     setLoading(true)
+    const payload = {
+      title: taskForm.title.trim(),
+      owner: taskForm.owner,
+    }
     try {
-      const payload = {
-        title: taskForm.title.trim(),
-        owner: taskForm.owner,
-      }
       await request('/tasks', {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -243,6 +314,15 @@ function App() {
       setTaskForm((prev) => ({ ...prev, title: '' }))
       await loadTasks(taskOwnerFilter)
     } catch (err) {
+      const fallback = {
+        id: Date.now(),
+        title: payload.title,
+        owner: payload.owner,
+        status: 'pendiente',
+      }
+      const next = [...tasks, fallback]
+      setTasksAndStore(taskOwnerFilter, next)
+      setTaskForm((prev) => ({ ...prev, title: '' }))
       setError(err.message)
     } finally {
       setLoading(false)
@@ -267,12 +347,12 @@ function App() {
     if (!taskEditId) return
     setError('')
     setLoading(true)
+    const payload = {
+      title: taskEditForm.title.trim(),
+      owner: taskEditForm.owner,
+      status: taskEditForm.status,
+    }
     try {
-      const payload = {
-        title: taskEditForm.title.trim(),
-        owner: taskEditForm.owner,
-        status: taskEditForm.status,
-      }
       await request(`/tasks/${taskEditId}`, {
         method: 'PATCH',
         body: JSON.stringify(payload),
@@ -280,6 +360,11 @@ function App() {
       setTaskEditId(null)
       await loadTasks(taskOwnerFilter)
     } catch (err) {
+      const next = tasks.map((task) =>
+        task.id === taskEditId ? { ...task, ...payload } : task,
+      )
+      setTasksAndStore(taskOwnerFilter, next)
+      setTaskEditId(null)
       setError(err.message)
     } finally {
       setLoading(false)
@@ -293,6 +378,8 @@ function App() {
       await request(`/tasks/${id}`, { method: 'DELETE' })
       await loadTasks(taskOwnerFilter)
     } catch (err) {
+      const next = tasks.filter((task) => task.id !== id)
+      setTasksAndStore(taskOwnerFilter, next)
       setError(err.message)
     } finally {
       setLoading(false)
